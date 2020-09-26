@@ -30,8 +30,7 @@ class drive_state(enum.Enum):
 	drive = 0
 	obstacle = 1
 	stop = 2
-	move_parking_spot = 3
-	parking_moving = 4
+	parking = 3
 
 class obstacle_state(enum.Enum):
 	straight = 0
@@ -44,13 +43,11 @@ pub = None
 Width = 640
 Height = 480
 Offset = 340 #origin340
-Gap = 50
+Offset2 = 310
+Gap = 40
 speed_rpm = 0
 breaking_speed = 0
 across_bar = 18
-right_max = 50
-left_max = -50
-find_parking_flag = False
 
 def signal_handler(sig, frame):
 	os.system('killall -9 python rosout')
@@ -60,22 +57,26 @@ signal.signal(signal.SIGINT, signal_handler)
 def img_callback(data):
 	global image    
 	image = bridge.imgmsg_to_cv2(data, "bgr8")
+
+def speed_callback(msg):
+	global speed_rpm
+	speed_rpm = msg.data / 500.0 # if speed max 5000 constant will be 440
+	#print("speed : ", speed_rpm)
 	
 def lidar_callback(msg) :
 	global lidar_scan
 	lidar_scan = msg.ranges
 
 def pose_callback(msg):
-	global ar_pose_x, ar_pose_y, ar_pose_z, ar_pose_ox, ar_pose_oy, ar_pose_oz, ar_pose_ow, ar_pose_id
+	global ar_pose_x, ar_pose_y, ar_pose_z, ar_pose_ox, ar_pose_oy, ar_pose_oz, ar_pose_ow
 	ar_pose_x = 0
 	ar_pose_y = 0
-	ar_pose_z = 0
+	ar_pose_z =0
 	ar_pose_ox = 0
 	ar_pose_oy = 0
 	ar_pose_oz = 0
 	ar_pose_ow = 0
-	ar_pose_id = 0
-	ar_pose_id = msg.markers[0].id
+
 	ar_pose_x = msg.markers[0].pose.pose.position.x
 	ar_pose_y = msg.markers[0].pose.pose.position.y
 	ar_pose_z = msg.markers[0].pose.pose.position.z
@@ -83,26 +84,6 @@ def pose_callback(msg):
 	ar_pose_oy = msg.markers[0].pose.pose.orientation.y
 	ar_pose_oz = msg.markers[0].pose.pose.orientation.z
 	ar_pose_ow = msg.markers[0].pose.pose.orientation.w
-
-
-def find_parking_spot(state):
-	point =[]
-	for i in lidar_scan[142:180]:#Angle : 38.9
-			if i <= 0.75 :#INF is float("inf")
-				point.append(i)
-	if np.average(point) <= 0.75 :
-		speed = 0
-		return drive_state.move_parking_spot #move_parking_spot
-	return state
-
-def turn_parking():
-	point =[]
-	for i in lidar_scan[170:180]:
-			if i <= 0.55 :#INF is float("inf")
-				point.append(i)
-	if np.average(point) <= 0.55 :
-		return True
-	return False
 
 # publish xycar_motor msg
 def drive(Angle, Speed): 
@@ -114,6 +95,7 @@ def drive(Angle, Speed):
 
 	pub.publish(msg)
 
+#pid
 def calculate_pid(reference_input, feedback_input, proportional_gain, intergral_gain, derivative_gain):
 	global errorList
 	error = feedback_input - reference_input
@@ -131,13 +113,16 @@ def calculate_pid(reference_input, feedback_input, proportional_gain, intergral_
 	presaturated_output = proportional_output + intergral_output + derivative_output
 	return presaturated_output
 
+# draw lines
 def draw_lines(img, lines, Offset):
+	#global Offset
 	for line in lines:
 		x1, y1, x2, y2 = line[0]
 		color = (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
 		img = cv2.line(img, (x1, y1+Offset), (x2, y2+Offset), color, 2)
 	return img
 
+# draw rectangle
 def draw_rectangle(img, lpos, rpos, offset=0):
 	center = (lpos + rpos) / 2
 
@@ -150,14 +135,19 @@ def draw_rectangle(img, lpos, rpos, offset=0):
 	cv2.rectangle(img, (center-5, 15 + offset),
 						(center+5, 25 + offset),
 						(0, 255, 0), 2)    
+	# cv2.rectangle(img, (315, 15 + offset),
+	# 					(325, 25 + offset),
+	# 					(0, 0, 255), 2)
 	return img
 
+# left lines, right lines
 def divide_left_right(lines):
 	global Width
 
 	low_slope_threshold = 0
 	high_slope_threshold = 10
 
+	# calculate slope & filtering with threshold
 	slopes = []
 	new_lines = []
 
@@ -173,6 +163,7 @@ def divide_left_right(lines):
 			slopes.append(slope)
 			new_lines.append(line[0])
 
+	# divide lines left to right
 	left_lines = []
 	right_lines = []
 
@@ -189,7 +180,9 @@ def divide_left_right(lines):
 
 	return left_lines, right_lines
 
+# get average m, b of lines
 def get_line_params(lines):
+	# sum of x, y, m
 	x_sum = 0.0
 	y_sum = 0.0
 	m_sum = 0.0
@@ -212,8 +205,11 @@ def get_line_params(lines):
 
 	return m, b
 
+# get lpos, rpos
 def get_line_pos(img, lines, Offset, left=False, right=False):
 	global Width, Height, Gap
+	#global Offset 
+
 	m, b = get_line_params(lines)
 
 	if m == 0 and b == 0:
@@ -233,36 +229,10 @@ def get_line_pos(img, lines, Offset, left=False, right=False):
 
 	return img, int(pos)
 
-
-
-
-
+# show image and return lpos, rpos
 def process_image(frame):
 	global Width
-	global Offset, Gap
-	# # gray
-	# gray = cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY)
-	# blur
-	# kernel_size = 5
-	# blur_gray = cv2.GaussianBlur(frame,(kernel_size, kernel_size), 0)
-	# white filter
-	# mark=np.copy(frame)
-	# bgr_threshold = [200,200,200]
-	# thresholds = (image[:,:,0] < bgr_threshold[0]) | (image[:,:,1]<bgr_threshold[1]) | (image[:,:,2]<bgr_threshold[2])
-	# mark[thresholds] = [0,0,0]
-
-	# #hsv
-	# hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-
-	# # blur
-	# kernel_size = 5
-	# blur_hsv = cv2.GaussianBlur(hsv, (kernel_size, kernel_size), 10)
-
-	# #inRange
-	# lower_white = np.array([0, 0, 200])
-	# upper_white = np.array([200, 255, 255])
-	# mask = cv2.inRange(blur_hsv, lower_white, upper_white)
-
+	global Offset, Offset2, Gap
 	# gray
 	gray = cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY)
 
@@ -271,45 +241,41 @@ def process_image(frame):
 	blur_gray = cv2.GaussianBlur(gray,(kernel_size, kernel_size), 0)
 
 	# canny edge
-	low_threshold = 65
+	low_threshold = 50
 	high_threshold = 150
 	edge_img = cv2.Canny(np.uint8(blur_gray), low_threshold, high_threshold)
 
 	# HoughLinesP
 	roi = edge_img[Offset : Offset+Gap, 0 : Width]
+	roi2 = edge_img[Offset2 : Offset2+Gap, 0 : Width]
 	all_lines = cv2.HoughLinesP(roi,1,math.pi/180,30,30,10)
+	all_lines2 = cv2.HoughLinesP(roi2,1,math.pi/180,30,30,10)
 
 	# divide left, right lines
-	if all_lines is None :
-		lpos, rpos = 0,640	
+	if all_lines is None and all_lines2 is None :
+		lpos, rpos, lpos2, rpos2 = 0,640,0,640
+	elif all_lines is None :
+		lpos, rpos = 0, 640
+		lpos2, rpos2 = lane_detection(frame, all_lines2, Offset2)		
+	elif all_lines2 is None :
+		lpos2,rpos2 = 0, 640
+		lpos, rpos = lane_detection(frame, all_lines, Offset)		
 	else : 
 		lpos, rpos = lane_detection(frame, all_lines, Offset)
+		lpos2, rpos2 = lane_detection(frame, all_lines2, Offset2)
 
 	center = (lpos + rpos) / 2
+	center2 = (lpos2 + rpos2) / 2
+	real_center = center * 0.75 + center2 * 0.25
 
-	frame = cv2.line(frame, (320, Offset+Gap), (320, 310),(0,0,255), 3)
+	frame = cv2.line(frame, (320, Offset+Gap), (320, Offset2),(0,0,255), 3)
 	frame = cv2.line(frame, (230, 235), (410, 235), (255,255,255), 2)
 
 	# show image
 	cv2.imshow('calibration', frame)
 
-	return center, edge_img
+	return real_center, center, edge_img
 
-
-
-def lane_detection(frame, all_lines, off, draw = True):
-	left_lines, right_lines = divide_left_right(all_lines)
-
-	# get center of lines
-	frame, lpos = get_line_pos(frame, left_lines, off, left=True)
-	frame, rpos = get_line_pos(frame, right_lines, off, right=True)
-	# draw lines
-	frame = draw_lines(frame, left_lines, off)
-	frame = draw_lines(frame, right_lines, off)
-	# draw rectangle
-	frame = draw_rectangle(frame, lpos, rpos, offset=off)
-
-	return lpos, rpos
 
 def region_of_interest(img, vertices, color3=(255,255,255), color1=255): # ROI 셋팅
 
@@ -333,30 +299,17 @@ def weighted_img(img, initial_img, a=1, b=1, c=0): # 두 이미지 operlap 하�
 
 
 def hough_lines_across(img, rho, theta, threshold, min_line_len, max_line_gap): # 허프 변환
-	global Width, Height
-	#vertices = np.array([[(-50, Height - 60),(190, Height / 2 + 60), (450, Height / 2 + 60), (Width+50, Height - 60)]], dtype=np.int32)
-	vertices = np.array([[(-50, Height - 60),(220, Height / 2), (430, Height / 2), (Width+50, Height - 60)]], dtype=np.int32)
+	vertices = np.array([[(-50, Height - 60),(Width / 4, Height / 2 + 20), (3 * Width / 4, Height / 2 + 20), (Width + 50, Height - 60)]], dtype=np.int32)
 	roi_img = region_of_interest(img, vertices) # ROI 설정
-#	cv2.imshow("roi", roi_img)
-	#line_img = np.zeros((roi_img.shape[0], roi_img.shape[1], 3), dtype=np.uint8)
+	#cv2.imshow("rio", roi_img)
 	lines = cv2.HoughLinesP(roi_img, rho, theta, threshold, np.array([]), minLineLength=min_line_len, maxLineGap=max_line_gap)
-	#line_arr = lines
 	line_arr = np.squeeze(lines)
-	# print("Error : ", line_arr)
-	# print("Error type : ", type(line_arr))
-	# print("Error size : ", line_arr.size)
-	# print("Error dimen : ", line_arr.ndim)
-	if line_arr.size == 1:
-		return 0
-	elif line_arr.ndim == 1:
-		return 0
-	#line_arr = lines
-	#print("Error : ", (np.arctan2(line_arr[:,1] - line_arr[:,3], line_arr[:,0] - line_arr[:,2]) * 180) / np.pi)
+
 	slope_degree = (np.arctan2(line_arr[:,1] - line_arr[:,3], line_arr[:,0] - line_arr[:,2]) * 180) / np.pi
 
 	# 수평 기울기 제한
-	line_arr = line_arr[np.abs(slope_degree)<170]
-	slope_degree = slope_degree[np.abs(slope_degree)<170]
+	line_arr = line_arr[np.abs(slope_degree)<140]
+	slope_degree = slope_degree[np.abs(slope_degree)<140]
 	# 수직 기울기 제한
 	line_arr = line_arr[np.abs(slope_degree)>90]
 	slope_degree = slope_degree[np.abs(slope_degree)>90]
@@ -364,30 +317,20 @@ def hough_lines_across(img, rho, theta, threshold, min_line_len, max_line_gap): 
 	L_lines, R_lines = line_arr[(slope_degree>0),:], line_arr[(slope_degree<0),:]
 	L_lines, R_lines = L_lines[:,None], R_lines[:,None]
 
-	#draw_lines(line_img, L_lines, 0)
-	#draw_lines(line_img, R_lines, 0)
 
-	#    print("len(L_lines) : ", len(L_lines))
-	#    print("len(R_lines) : ", len(R_lines))
+	line_img = np.zeros((img.shape[0], img.shape[1], 3), dtype=np.uint8)
+	draw_lines(line_img, L_lines, 0)
+	draw_lines(line_img, R_lines, 0)
+	#cv2.imshow("line", line_img)
 	lines_cnt = len(L_lines) + len(R_lines)
-	#    cv2.imshow("across roi_img", roi_img)
 	return lines_cnt
 
 
 def hough_lines_cross(img, rho, theta, threshold, min_line_len, max_line_gap): # 허프 변환
-	global Width, Height
-	stop_flag = False
-	vertices = np.array([[(-50,  Height), (100, 2 *  Height / 3), (540, 2 *  Height / 3), (Width + 50,  Height)]], dtype=np.int32)
+	vertices = np.array([[(-50, Height - 60),(Width / 4, 2 * Height / 3), (3 * Width / 4, 2 * Height / 3), (Width + 50, Height - 60)]], dtype=np.int32)
 	roi_img = region_of_interest(img, vertices) # ROI 설정
-#	cv2.imshow("roi", roi_img)
-	#line_img = np.zeros((roi_img.shape[0], roi_img.shape[1], 3), dtype=np.uint8)
-
 	lines = cv2.HoughLinesP(roi_img, rho, theta, threshold, np.array([]), minLineLength=min_line_len, maxLineGap=max_line_gap)
 	line_arr = np.squeeze(lines)
-	if (line_arr.size == 1):
-		return False
-	elif (line_arr.ndim == 1):
-		return False
 
 	slope_degree = (np.arctan2(line_arr[:,1] - line_arr[:,3], line_arr[:,0] - line_arr[:,2]) * 180) / np.pi
 
@@ -395,40 +338,33 @@ def hough_lines_cross(img, rho, theta, threshold, min_line_len, max_line_gap): #
 	line_arr = line_arr[np.abs(slope_degree)<=180]
 	slope_degree = slope_degree[np.abs(slope_degree)<=180]
 	# 수직 기울기 제한
-	line_arr = line_arr[np.abs(slope_degree)>=180]
-	slope_degree = slope_degree[np.abs(slope_degree)>=180]
+	line_arr = line_arr[np.abs(slope_degree)>=170]
+	slope_degree = slope_degree[np.abs(slope_degree)>=170]
 	# 필터링된 직선 버리기
 	L_lines, R_lines = line_arr[(slope_degree>0),:], line_arr[(slope_degree<0),:]
 	L_lines, R_lines = L_lines[:,None], R_lines[:,None]
 
-	#draw_lines(line_img, L_lines, 0)
-	#draw_lines(line_img, R_lines, 0)
 
-    
-	L_y_max = 0
-	for line in L_lines:
-		x1, y1, x2, y2 = line[0]
-		L_y_max = max(y1, y2, L_y_max)
-		#print("cross L_lines y_max : ", L_y_max)
-	R_y_max = 0
-	for line in R_lines:
-		x1, y1, x2, y2 = line[0]
-		R_y_max = max(y1, y2, R_y_max)
-		#print("cross R_lines y_max : ", R_y_max)	
-	#print("cross final y_max : ", max(R_y_max, L_y_max))
-	if max(R_y_max, L_y_max) > 405:
-		stop_flag = True
-	#print("L : ", L_lines)
-	#print("L len : ", len(L_lines))
-	#print("R : ", R_lines)
-	#print("R len : ", len(R_lines))
-	#print("===================================================================================")
-	lines_cnt = len(L_lines) + len(R_lines)
-
+	# line_img = np.zeros((img.shape[0], img.shape[1], 3), dtype=np.uint8)
+	# draw_lines(line_img, L_lines, 0)
+	# draw_lines(line_img, R_lines, 0)
 	#cv2.imshow("line_img", line_img)
-#	cv2.imshow("roi", roi_img)
-	
-	return stop_flag
+	lines_cnt = len(L_lines) + len(R_lines)
+	return lines_cnt
+
+def lane_detection(frame, all_lines, off, draw = True):
+	left_lines, right_lines = divide_left_right(all_lines)
+
+	# get center of lines
+	frame, lpos = get_line_pos(frame, left_lines, off, left=True)
+	frame, rpos = get_line_pos(frame, right_lines, off, right=True)
+	# draw lines
+	frame = draw_lines(frame, left_lines, off)
+	frame = draw_lines(frame, right_lines, off)
+	# draw rectangle
+	frame = draw_rectangle(frame, lpos, rpos, offset=off)
+
+	return lpos, rpos
 
 
 def check_obstacle_avoiding() :
@@ -437,12 +373,12 @@ def check_obstacle_avoiding() :
 	left_point =[]
 	right_point =[]
 
-	for i in lidar_scan[60:90]:
-		if i < 0.45 :
+	for i in lidar_scan[70:90]:
+		if i < 0.65 :
 			left_point.append(i)
 	
-	for i in lidar_scan[90:120]:	
-		if i < 0.45 :
+	for i in lidar_scan[90:110]:	
+		if i < 0.65 :
 			right_point.append(i)
 
 	right_average = np.average(right_point)
@@ -463,236 +399,189 @@ def check_obstacle_avoiding() :
 	return Direction
 
 
-def go_left(speed, sec) :
-	start = time.time()
-	while True :
-		drive(-25, speed)
-		print("왼쪽으로 트는중")
-		if time.time() - start > sec :
-			break
+def go_left(center) :
+	global lidar_scan
+	angle = -((Width*6/10) - center)#(calculate_pid (Width*6/10, center,2.5,0,1))
+	print("go left")
+	right_point = []
+	for i in lidar_scan[135:170]:	
+		if i < 0.3 :
+			right_point.append(i)
 
-def go_right(speed, sec) :
-	start = time.time()
-	while True :
-		drive(25, speed)
-		print("오른쪽으로트는중")
-		if time.time() - start > sec :
-			break
+	if len(right_point) == 0 :
+		Direction = check_obstacle_avoiding()
+	else :
+		Direction = obstacle_state.left
+		print("라인유지")
+
+	return Direction, angle
+
+def go_right(center) :
+	global lidar_scan
+	angle = -((Width*4/10) - center)##(calculate_pid (Width*4/10, center,2.5,0,1))
+	print("go right")
+	left_point = []
+	for i in lidar_scan[10:45]:	
+		if i < 0.3 :
+			left_point.append(i)
+
+	if len(left_point) == 0 :
+		Direction = check_obstacle_avoiding()
+	else : 
+		Direction = obstacle_state.right
+		print("라인유지")
+
+	return Direction, angle
+
 
 def start():
 	global pub
-	global image, lidar_scan
-	global Width, Height, Offset
-	global ar_pose_x, ar_pose_y, ar_pose_z, ar_pose_ox, ar_pose_oy, ar_pose_oz, ar_pose_ow, ar_pose_id
+	global image
+	global cap
+	global Width, Heightgo_left
+	global speed_rpm, lidar_scan
+	global ar_pose_x, ar_pose_y, ar_pose_z, ar_pose_ox, ar_pose_oy, ar_pose_oz, ar_pose_ow
+	global obstacle_no_detection_time
 	global breaking_speed
 	global across_bar
-	global right_max, left_max
 	global errorList
 	State = drive_state.drive
 	errorList = [0]
-	angle, speed, count, ar_count, ar_time, obstacle_duration = 0, 0, 0, 0, 0, 0
+	angle = 0
+	speed = 0
+	count = 0 
 
-	detect_cross, detect_across, obstacle_finish = False, False, False
 	rospy.init_node('auto_drive')
 	pub = rospy.Publisher('xycar_motor', xycar_motor, queue_size=1)
+	speed_sub = rospy.Subscriber("/commands/motor/speed", Float64, speed_callback)
 	image_sub = rospy.Subscriber("/camera/image_raw", Image, img_callback)
 	lidar_sub = rospy.Subscriber("/scan", LaserScan, lidar_callback)
 	ar_sub = rospy.Subscriber("/ar_pose_marker", AlvarMarkers, pose_callback)
 	print "---------- Xycar A2 v1.0 ----------"
-	rospy.sleep(1)
+	rospy.sleep(2)
+
+	detect_cross = False
+	detect_across = False
+	detect_finish = False
 
 	while True:
 		a = time.time()
 		while not image.size == (640*480*3):
 			continue
 
-		center, copy_image = process_image(image)
-		#cv2.imshow("..",copy_image)
-		#error = center - Width/2
-		#lidar_calibration = int( np.arctan2(float(error), float(Offset)) *180/np.pi )
-		
-        
-        #---------------------Lane Keeping----------------------#
+		real_center,center, copy_image = process_image(image)
 
-		if(State == drive_state.drive):#check_obstacle_avoiding
+		#---------------------Lane Keeping----------------------#
+
+		if(State == drive_state.drive):
+
 			#--------- staright ---------#
-			if abs(angle) <= 20:
-				angle = -(Width/2 - center)/2.5 #lidar_calibration#(calculate_pid (Width/2, center,3.5,0.05,1.3) / 13.0)
+			if abs(angle) <= 15:
+				angle = -(Width/2 - center)
 				#angle = (calculate_pid (Width/2, real_center,3.0,0.12,1.1) / 16.0) # 5.5,0.1,1.1 //17.0    next time input this 3.5 0.1 1.1 !!!!!  원래 내코드 PID 3.0,0.05,1.3) / 7.0
 			#--------- curve ---------#
 			else:
-				angle = (calculate_pid (Width/2, center,3.5,0.05,1.3) / 5.5)
+				angle = (calculate_pid (Width/2, center,3.5,0.05,1.3) / 7.0)
 
 			speed = abs(calculate_pid(50,abs(angle),3.0,0.3,0.5)/3) # set value more precisely 
 			if speed <= 15.0 :
-				speed = 10
-            #--------- lidar ---------#
+				speed = 15.0
+
 			for i in lidar_scan[60:120]:
-				if i < 0.6:
+				if i < 0.8:
 					State = drive_state.obstacle
 					Direction = check_obstacle_avoiding()
-			#--------- stop ---------#
-			if obstacle_finish == True and detect_across == False and detect_cross == False: #한번 감지시 더이상 반복 X
-				#drive(angle, speed)
-				cnt = hough_lines_across(copy_image, 1, np.pi/180, 30, 30, 70) # 허프 변환
-				#cv2.imshow("hough_across", hough_across)
-				#across_img = weighted_img(hough_across, image) # 원본 이미지에 검출된 선 overlap
-				#cv2.imshow("across_origin", across_img)
-				if cnt > across_bar and time.time()-obstacle_duration > 1: #across_bar is 18 now
-					detect_across = True
-					speed = 3
-					State = drive_state.stop
-					drive(angle, speed)
-			#-------------ar tag-----------------#
-			if ar_pose_id > 0 and time.time() - ar_time >= 2.5 and ar_pose_z < 0.01 and ar_pose_z > 0.000000001:
-				ar_count += 1
-				ar_time = time.time()
-				if ar_count == 4:  #4:
-					State = drive_state.move_parking_spot
+					#speed = 0
 
-
-
+			# if detect_across == False and detect_cross == False:#한번 감지시 더이상 반복 X
+			# 	#drive(angle, speed)
+			# 	cnt = hough_lines_across(copy_image, 1, np.pi/180, 30, 30, 20) # 허프 변환
+			# 	#cv2.imshow("hough_across", hough_across)
+			# 	#across_img = weighted_img(hough_across, image) # 원본 이미지에 검출된 선 overlap
+			# 	#cv2.imshow("across_origin", across_img)
+			# 	if cnt > across_bar:#across_bar is 18 now
+			# 		detect_across = True
+			# 		speed = 4
+			# 		State = drive_state.stop
+			# 		drive(angle, speed)
 
 
 		#---------------------Obstacle Avoiding----------------------#
 
 		if(State == drive_state.obstacle):
 			speed = 5
-			print("하드코딩 디렉션: ",Direction)
-			if Direction == obstacle_state.right :
-				go_right(speed, 0.23)
-			elif Direction == obstacle_state.left :
-				go_left(speed, 0.23)
+			print("obstacle ", Direction)
+			if Direction == obstacle_state.left:
+				Direction, angle = go_left(center)
+				count = 0
+				#obstacle_no_detection_time = time.time()
+			elif Direction == obstacle_state.right:
+				Direction, angle = go_right(center)
+				count = 0
+				#obstacle_no_detection_time = time.time()
 			else :
-				center, copy_image = process_image(image)
 				angle = -(Width/2 - center)
-				
-			State = drive_state.drive
-			obstacle_duration = time.time()
-			obstacle_finish = True
+				#angle = (calculate_pid (Width/2, center,2.5,0.1,1.1) / 12.0)
+				count += 1
+			print(count)
+			if count == 90 : #time.time() - obstacle_no_detection_time > 2 :
+				State = drive_state.drive
+				print("탈출")
+				count = 0
+			
 
 		#---------------------Stop Line----------------------#
 
 		if(State == drive_state.stop) :
 			if detect_across == True and detect_cross == False:
-				center, copy_image = process_image(image)
-				speed = 3#-(speed - speed / 2)
-				angle = -(Width/2 - center)/2
-				stop_flag = hough_lines_cross(copy_image, 1, np.pi/180, 30, 40, 5) # 허프 변환
-
-				if stop_flag > 0:#across_bar is crosswalk
+				speed = 4#-(speed - speed / 2)
+				#drive(angle, speed)
+				cnt = hough_lines_cross(copy_image, 1, np.pi/180, 30, 10, 5) # 허프 변환
+				#cv2.imshow("hough_cross", hough_cross)
+				#cross_img = weighted_img(hough_cross, image) # 원본 이미지에 검출된 선 overlap
+				#cv2.imshow("cross_origin", cross_img)
+				if cnt > 0:#across_bar is crosswalk
 					detect_cross = True
 			
 			if detect_across == True and detect_cross == True :
-				obstacle_finish = False
-				center, copy_image = process_image(image)
-				angle = -(Width/2 - center)/3
 				drive(angle, breaking_speed)
 				print("sleep")
-				rospy.sleep(5.2)
-				start = time.time()
-				while True :				
-					center, copy_image = process_image(image)
-					angle = -(Width/2 - center)/2.5
-					drive(0, 10)
-					print("직진중")
-					if time.time() - start > 0.3:
-						break
+				rospy.sleep(5)
+				# detect_finish = True
+				#speed = 4
+				#drive(angle, speed)
 				detect_across = False
 				detect_cross = False
 				State = drive_state.drive
 
-		#---------------------move parking spot----------------------#
+			# if detect_across == True and detect_cross == True and detect_finish == True:
+			# 	speed = 10
+			# 	if np.average(point) <= 0.7 :
+			# 		speed = 0
+			# 	drive(angle, speed)
 
-		if(State == drive_state.move_parking_spot):
-			
-			start_time = time.time()
-			while True :
-				center, copy_image = process_image(image)
-				speed = 4 #-(speed - speed / 2)
-				angle = -(Width/2 - center)/2 
-				drive(angle, speed)	
-				point = []
-				for i in lidar_scan[165:175]:#Angle : 38.9
-					if i <= 0.55 :#INF is float("inf")
-						print("자이트론 만세")
-						point.append(i)
-				if np.average(point) <= 0.5 and time.time()-start_time > 4.5:
-					drive(angle, 0)
-					break
-
-			start = time.time()
-			while True :
-				drive(0, 3)
-				print("직진중")
-				if time.time() - start > 1.9:
-					break	
-
-			start = time.time()
-			while True :
-				drive(50, -3)
-				print("후진중")
-				if time.time() - start > 2.3:
-					break
-
-			start = time.time()
-			while True :
-				drive(-50, -3)
-				print("후진중")
-				if time.time() - start > 2.3:
-					break	
-			State = drive_state.parking_moving
-						
-
-		#---------------------parking_moving----------------------#
-
-		if(State == drive_state.parking_moving):
-
-			if ar_pose_x < -0.05 and ar_pose_z < 0.0015:
-				angle = 10
-				speed = -calculate_pid(0.002, ar_pose_z,5.5,0.05,1.1) * 800
-				if speed >= 4:
-					speed = 4
-			elif ar_pose_x > 0.05 and ar_pose_z < 0.0015:
-				angle = -10
-				speed = -calculate_pid(0.002, ar_pose_z,5.5,0.05,1.1) * 800
-				if speed >= 4:
-					speed = 4
-			elif ar_pose_x < -0.05 and ar_pose_z > 0.0025:
-				angle = 10
-				speed = calculate_pid(0.002, ar_pose_z,5.5,0.05,1.1) * 800
-				if speed >= 4:
-					speed = 4
-			elif ar_pose_x > 0.05 and ar_pose_z > 0.0025:
-				angle = -10
-				speed = calculate_pid(0.002, ar_pose_z,5.5,0.05,1.1) * 800
-				if speed >= 4:
-					speed = 4
-			else:
-				angel = 0
-				speed = 0
-					
 
 		drive(angle, speed)
+
+		# PRINT
 
 
 		print("\n\n---------------------------------------------------")
 		print("Current State : ", State)
 		print("angle, speed : ", angle, speed)
-		print("lidar value : ", lidar_scan[90])
-		print("ar_value : ")
-		print("x : ", ar_pose_x)
-		print("y : ", ar_pose_y)
-		print("z : ", ar_pose_z)
-		print("ox : ", ar_pose_ox)
-		print("oy : ", ar_pose_oy)
-		print("oz : ", ar_pose_oz)
-		print("ow : ", ar_pose_ow)
-		print("ar_count : ", ar_count)
-		print("find_parking_flag : ", find_parking_flag)
+		# print("lidar value : ", lidar_scan[90])
+		# print("ar_value : ")
+		# print("x : ", ar_pose_x)
+		# print("y : ", ar_pose_y)
+		# print("z : ", ar_pose_z)
+		# print("ox : ", ar_pose_ox)
+		# print("oy : ", ar_pose_oy)
+		# print("oz : ", ar_pose_oz)
+		# print("ow : ", ar_pose_ow)
+		#print("detect_across : ", detect_across)
+		#print("detect_cross : ", detect_cross)
 		b = time.time()
 		print("timestamp : ",b-a)
-
 		if cv2.waitKey(1) & 0xFF == ord('q'):
 			break
 
@@ -702,3 +591,4 @@ def start():
 if __name__ == '__main__':
 
 	start()
+
