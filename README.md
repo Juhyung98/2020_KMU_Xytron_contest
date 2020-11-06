@@ -1,5 +1,5 @@
 # Kookmin_Autonomous_driving_Competition_FINAL   
-# 2020_KMU_Xytron_contest    
+2020_KMU_Xytron_contest    
 ----------------------------------------------  
 This code is for 2020_KMU_Xytron_contest.    
 The car is Xycar A2 of Xytron.    
